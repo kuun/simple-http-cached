@@ -3,15 +3,14 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt};
-use hyper::client::conn::http1::Builder;
-use hyper::header::HeaderValue;
+use http_body_util::{combinators::BoxBody, BodyExt, Empty};
+use hyper::{body::Incoming, Request, Response, StatusCode};
+use hyper_util::client::legacy::Client;
+
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-
-use tokio::net::{TcpListener, TcpStream};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::net::TcpListener;
 
 // To try this example:
 // 1. cargo run --example http_proxy
@@ -45,31 +44,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn proxy(
-    req: Request<hyper::body::Incoming>,
+    req: Request<Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-
     let host = "snapshot.debian.org";
-    let port = 80;
-
-    let stream = TcpStream::connect((host, port)).await.unwrap();
-    let io = TokioIo::new(stream);
-
-    let (mut sender, conn) = Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(io)
-        .await?;
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            println!("Connection failed: {:?}", err);
-        }
-    });
     let uri = req.uri().clone();
+ /*    let uri = req.uri().clone();
     let (parts, body) = req.into_parts();
     let mut req = Request::from_parts(parts, body.boxed());
-    req.headers_mut().insert("Host", HeaderValue::from_static(host));
+    req.headers_mut()
+        .insert("Host", HeaderValue::from_static(host)); */
 
-    let resp = sender.send_request(req).await?;
-    println!("{:?} --> {:?}", uri, resp.status());
-    Ok(resp.map(|b| b.boxed()))
-}   
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .expect("no native root CA certificates found")
+        .https_only()
+        .enable_http1()
+        .build();
+
+    let client: Client<_, BoxBody<Bytes, hyper::Error>> =
+        Client::builder(TokioExecutor::new()).build(https);
+    let new_req = Request::builder()
+        .method(req.method())
+        .uri(format!("https://{}{}", host, uri))
+        .body(req.boxed())   
+        .unwrap();
+
+
+
+    let resp = client.request(new_req).await;
+    match resp {
+        Ok(resp) => {
+            println!("{:?} --> {:?}", uri, resp.status());
+            Ok(resp.map(|b| b.boxed()))
+        }
+        Err(e) => {
+            println!("{:?} --> {:?}", uri, e);
+            let mut not_found = Response::new(empty());
+            *not_found.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            Ok(not_found)
+        }
+    }
+}
+
+fn empty() -> BoxBody<Bytes, hyper::Error> {
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
+}
