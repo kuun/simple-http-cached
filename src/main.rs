@@ -3,9 +3,9 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{body::Incoming, Request, Response, StatusCode};
-use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::{Client, Error};
 
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -79,15 +79,15 @@ async fn proxy(
         }
         Err(e) => {
             println!("{:?} --> {:?}", uri, e);
-            let mut not_found = Response::new(empty());
-            *not_found.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            Ok(not_found)
+            let mut internal_error = Response::new(error_body(e));
+            *internal_error.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            Ok(internal_error)
         }
     }
 }
 
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
+fn error_body(e: Error) -> BoxBody<Bytes, hyper::Error> {
+    Full::<Bytes>::new(format!("Error: {}", e).into())
         .map_err(|never| match never {})
         .boxed()
 }
