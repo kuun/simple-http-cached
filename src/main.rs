@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use futures_util::TryStreamExt;
+use http_body_util::Empty;
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::Uri;
 use hyper::{
@@ -81,6 +82,19 @@ async fn proxy(
         Ok(resp) => {
             println!("{:?} --> {:?}", uri, resp.status());
 
+            // Handle redirection by returning the response to the client
+            if resp.status().is_redirection() {
+                if let Some(location) = resp.headers().get("location") {
+                    println!("Redirecting to {:?}", location);
+                    let location_str = location.to_str().unwrap();
+                    let redirect_cache_file_path = format!("{}_redirect", path_from_uri(&uri));
+                    tokio::fs::write(&redirect_cache_file_path, location_str)
+                        .await
+                        .unwrap();
+                    return Ok(resp.map(|body| BoxBody::new(body)));
+                }
+            }
+
             // open file to save response body
 
             let cache_file_path = path_from_uri(&uri);
@@ -133,6 +147,18 @@ async fn get_cached_response(
     let uri = req.uri().clone();
     let cache_file_path = path_from_uri(&uri);
 
+    // Check if the redirect cache file exists
+    let redirect_cache_file_path = format!("{}_redirect", cache_file_path);
+    if let Ok(location) = std::fs::read_to_string(&redirect_cache_file_path) {
+        let response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header("Location", location)
+            .body(Empty::<Bytes>::new().map_err(|e| match e {}).boxed())
+            .unwrap();
+        return Some(response);
+    }
+
+    // Check if the cache file exists
     let file = tokio::fs::File::open(&cache_file_path).await.ok()?;
     let stream = ReaderStream::new(file)
         .map_ok(|data| Frame::data(data))
