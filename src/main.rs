@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+use clap::Parser;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::Empty;
@@ -20,16 +21,23 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 use tokio_util::io::{InspectReader, ReaderStream, StreamReader};
 
-// To try this example:
-// 1. cargo run --example http_proxy
-// 2. config http_proxy in command line
-//    $ export http_proxy=http://127.0.0.1:8100
-//    $ export https_proxy=http://127.0.0.1:8100
-// 3. send requests
-//    $ curl -i https://www.some_domain.com/
+/// Simple HTTP Proxy with Caching
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    /// Target server to proxy requests to
+    #[clap(short, long, default_value = "snapshot.debian.org")]
+    target_server: String,
+
+    /// Address to listen on
+    #[clap(short, long, default_value = "127.0.0.1:8100")]
+    listen_addr: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8100));
+    let args = Args::parse();
+    let addr : SocketAddr = args.listen_addr.parse()?;
 
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -37,12 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let target_server = args.target_server.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
-                .serve_connection(io, service_fn(proxy))
+                .serve_connection(io, 
+                    service_fn(|req| proxy(req, target_server.clone())))
                 .await
             {
                 println!("Failed to serve connection: {:?}", err);
@@ -53,8 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn proxy(
     req: Request<Incoming>,
+    target_server : String,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Infallible> {
-    let host = "snapshot.debian.org";
+    let host = target_server;
     let uri = req.uri().clone();
 
     println!("{:?} -->", uri);
@@ -103,10 +114,10 @@ async fn proxy(
             let stream = resp.into_data_stream();
 
             let reader = StreamReader::new(
-                stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             );
             let reader = InspectReader::new(reader, move |chunk| {
-                println!("{} bytes read", chunk.len());
+                // println!("{} bytes read", chunk.len());
                 let mut file = Arc::clone(&file);
 
                 if chunk.len() > 0 {
