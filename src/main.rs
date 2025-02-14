@@ -32,12 +32,16 @@ struct Args {
     /// Address to listen on
     #[clap(short, long, default_value = "127.0.0.1:8100")]
     listen_addr: String,
+
+    /// Protocol to use (http or https)
+    #[clap(short, long, default_value = "https")]
+    protocol: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let addr : SocketAddr = args.listen_addr.parse()?;
+    let addr: SocketAddr = args.listen_addr.parse()?;
 
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -46,13 +50,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let target_server = args.target_server.clone();
+        let protocol = args.protocol.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
-                .serve_connection(io, 
-                    service_fn(|req| proxy(req, target_server.clone())))
+                .serve_connection(
+                    io,
+                    service_fn(|req| proxy(req, target_server.clone(), protocol.clone())),
+                )
                 .await
             {
                 println!("Failed to serve connection: {:?}", err);
@@ -63,7 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn proxy(
     req: Request<Incoming>,
-    target_server : String,
+    target_server: String,
+    protocol: String,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Infallible> {
     let host = target_server;
     let uri = req.uri().clone();
@@ -73,23 +81,36 @@ async fn proxy(
         return Ok(resp);
     }
 
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .expect("no native root CA certificates found")
-        .https_only()
-        .enable_http1()
-        .build();
+    let response = if protocol == "https" {
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .expect("no native root CA certificates found")
+            .https_only()
+            .enable_http1()
+            .build();
+        let client = Client::builder(TokioExecutor::new()).build(https);
+        
+        let new_req = Request::builder()
+            .method(req.method())
+            .uri(format!("{}://{}{}", protocol, host, uri))
+            .body(req.boxed())
+            .unwrap();
 
-    let client: Client<_, BoxBody<Bytes, hyper::Error>> =
-        Client::builder(TokioExecutor::new()).build(https);
-    let new_req = Request::builder()
-        .method(req.method())
-        .uri(format!("https://{}{}", host, uri))
-        .body(req.boxed())
-        .unwrap();
+        client.request(new_req).await
+    } else {
+        let http = hyper_util::client::legacy::connect::HttpConnector::new();
+        let client = Client::builder(TokioExecutor::new()).build(http);
+        
+        let new_req = Request::builder()
+            .method(req.method())
+            .uri(format!("{}://{}{}", protocol, host, uri))
+            .body(req.boxed())
+            .unwrap();
 
-    let resp = client.request(new_req).await;
-    match resp {
+        client.request(new_req).await
+    };
+
+    match response {
         Ok(resp) => {
             println!("{:?} --> {:?}", uri, resp.status());
 
