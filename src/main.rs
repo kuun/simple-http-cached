@@ -127,8 +127,13 @@ async fn proxy(
                 }
             }
 
-            // open file to save response body
+            // Don't cache 5xx responses
+            if resp.status().is_server_error() {
+                let body = resp.into_body();
+                return Ok(Response::new(BoxBody::new(body)));
+            }
 
+            // open file to save response body
             let cache_file_path = path_from_uri(&uri);
             let file = Arc::new(std::fs::File::create(cache_file_path).unwrap());
 
